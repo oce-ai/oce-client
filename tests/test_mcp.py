@@ -379,19 +379,37 @@ def test_mcp_configuration_loads_environment_defaults(tmp_path: Path, monkeypatc
     assert config.log_level == "warning"
 
 
-def test_standalone_mcp_without_workspace_fails_cleanly(tmp_path: Path, monkeypatch):
+def test_standalone_mcp_without_workspace_falls_back_to_cwd(
+    tmp_path: Path, monkeypatch
+):
     monkeypatch.delenv("OCE_WORKSPACE", raising=False)
     monkeypatch.delenv("OCE_WORKSPACES", raising=False)
-    from oce_client.mcp_server import main
+    monkeypatch.chdir(tmp_path)
+    config = McpConfiguration.from_environment()
+    assert config.workspace_roots == (tmp_path.resolve(),)
 
+
+def test_mcp_cwd_fallback_refuses_filesystem_root(monkeypatch):
+    from oce_client.mcp_server import main
+    from oce_client.runtime import _resolve_mcp_roots
+
+    monkeypatch.delenv("OCE_WORKSPACE", raising=False)
+    monkeypatch.delenv("OCE_WORKSPACES", raising=False)
+    monkeypatch.chdir("/")
+    with pytest.raises(ClientConfigurationError, match="refusing to index"):
+        _resolve_mcp_roots(None)
+    # 独立入口在同样条件下应干净退出而不是挂起或误索引
     assert main(["--initial-sync", "off"]) == 1
 
 
-def test_mcp_requires_explicit_workspace_when_environment_is_empty(monkeypatch):
+def test_mcp_explicit_workspace_still_wins_over_cwd(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("OCE_WORKSPACE", raising=False)
     monkeypatch.delenv("OCE_WORKSPACES", raising=False)
-    with pytest.raises(ClientConfigurationError, match="requires at least one workspace"):
-        McpConfiguration.from_environment(workspace_roots=())
+    monkeypatch.chdir(tmp_path)
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    config = McpConfiguration.from_environment(workspace_roots=(explicit,))
+    assert config.workspace_roots == (explicit.resolve(),)
 
 
 def test_mcp_rejects_ambiguous_state_configuration(tmp_path: Path):

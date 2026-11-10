@@ -37,6 +37,7 @@ class WorkspaceIndexer:
         self._last_error: str | None = None
         self._watch: WatchHandle | None = None
         self._worker: threading.Thread | None = None
+        self._matcher: LayeredIgnoreMatcher | None = None
 
     @property
     def root(self) -> Path:
@@ -96,8 +97,17 @@ class WorkspaceIndexer:
         with self._condition:
             self._request_full_locked()
 
+    def _ignore_matcher(self) -> LayeredIgnoreMatcher:
+        """缓存的忽略规则：构造要遍历目录树收集 .gitignore，watcher 每条事件
+        都重建会在十万级目录的仓库上造成明显卡顿。"""
+        if self._matcher is None:
+            self._matcher = LayeredIgnoreMatcher(
+                self.root, self.settings.runtime_patterns
+            )
+        return self._matcher
+
     def notify_changes(self, paths: set[Path]) -> None:
-        matcher = LayeredIgnoreMatcher(self.root, self.settings.runtime_patterns)
+        matcher = self._ignore_matcher()
         relevant: set[Path] = set()
         for path in paths:
             resolved = path.resolve()
@@ -105,10 +115,11 @@ class WorkspaceIndexer:
                 relative = resolved.relative_to(self.root).as_posix()
             except ValueError:
                 continue
-            if resolved.name in {".gitignore", ".oceignore"} or not matcher.ignores(
-                relative,
-                is_dir=resolved.is_dir(),
-            ):
+            if resolved.name in {".gitignore", ".oceignore"}:
+                # 规则文件本身变了：旧规则作废，且必须全量重扫受影响范围
+                self._matcher = None
+                relevant.add(resolved)
+            elif not matcher.ignores(relative, is_dir=resolved.is_dir()):
                 relevant.add(resolved)
         if not relevant:
             return

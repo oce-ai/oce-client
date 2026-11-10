@@ -56,6 +56,7 @@ class WorkspaceContext:
         self.identity = identity or Sha256BlobIdentity()
         self.file_source = file_source or LocalFileSource()
         self.runtime_patterns = tuple(runtime_patterns)
+        self._cached_matcher: LayeredIgnoreMatcher | None = None
         self.ready_poll_attempts = ready_poll_attempts
         self.ready_poll_seconds = ready_poll_seconds
         if max_find_missing < 1 or max_upload_blobs < 1 or max_upload_bytes < 1:
@@ -102,7 +103,18 @@ class WorkspaceContext:
             close()
 
     def _matcher(self) -> LayeredIgnoreMatcher:
-        return LayeredIgnoreMatcher(self.root, self.runtime_patterns)
+        # 规则文件（.gitignore/.oceignore）在进程内基本不变，构造要遍历目录树
+        # 收集各层 .gitignore（8k 目录约 80ms），因此缓存复用；规则文件本身
+        # 被改动时由 refresh_matcher() 显式失效。
+        if self._cached_matcher is None:
+            self._cached_matcher = LayeredIgnoreMatcher(
+                self.root, self.runtime_patterns
+            )
+        return self._cached_matcher
+
+    def refresh_matcher(self) -> None:
+        """丢弃缓存的忽略规则（.gitignore/.oceignore 变更后调用）。"""
+        self._cached_matcher = None
 
     def _next_generation(self) -> int:
         return self.state.load_snapshot().generation + 1
@@ -245,6 +257,10 @@ class WorkspaceContext:
             return self.snapshot()
         for path in resolved_paths:
             if path.name in {".gitignore", ".oceignore"} or path.is_dir():
+                # 规则文件或目录变更会影响整棵树，走全量 reconcile；
+                # 规则文件本身改写时要重建缓存的忽略规则。
+                if path.name in {".gitignore", ".oceignore"}:
+                    self.refresh_matcher()
                 return self.reconcile()
 
         generation = self._next_generation()

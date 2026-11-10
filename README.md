@@ -68,7 +68,39 @@ The two interfaces have different lifecycles:
 | Interface | Workspace selection | State selection | Index lifecycle |
 | --- | --- | --- | --- |
 | CLI | one `--root` or `OCE_WORKSPACE` | `--state-path` or `OCE_STATE_PATH` | explicit `sync`, optional `watch` |
-| MCP | repeated `--workspace`, `OCE_WORKSPACE`, or `OCE_WORKSPACES` | one `--state-path`, or per-workspace `--state-dir` | process-owned background and incremental sync |
+| MCP | repeated `--workspace`, `OCE_WORKSPACE`, `OCE_WORKSPACES`, or the launch directory by default | one `--state-path`, or per-workspace `--state-dir` | process-owned background and incremental sync |
+
+## Ignore Rules
+
+Files are filtered by a layered matcher, highest precedence first:
+
+| Layer | Source |
+| --- | --- |
+| Hard | `.git/`, `.oce-client/` (cannot be re-included) |
+| Runtime | `--ignore` / `OCE_IGNORE` |
+| Project | `.oceignore` in the workspace root |
+| Git | `.gitignore` in the root and in every subdirectory |
+| Built-in | Language build outputs and caches |
+
+Both `.gitignore` and `.oceignore` are read from the workspace root **and from
+every subdirectory**, following git semantics: each file governs its own
+directory subtree and its patterns are relative to that directory, so
+`sub/.gitignore` containing `generated/` hides `sub/generated/` but not
+`other/generated/`. Deeper files take precedence over shallower ones, so a
+nested `!local.py` can re-include a file excluded by the root `.gitignore`.
+
+This makes a workspace root holding several projects behave predictably: rules
+in `proj-a/` only affect `proj-a/`, rules in `proj-b/` only affect `proj-b/`,
+and each project keeps its own `.oceignore` overrides. The built-in layer
+applies to every project regardless of which language it is written in.
+
+The built-in layer keeps the index free of noise even when a project has no
+`.gitignore`: `node_modules/`, `target/`, `__pycache__/`, `.next/`, `dist/`,
+`build/`, `_build/`, `.dart_tool/`, `obj/`, and similar. It is the lowest
+precedence layer, so `!pattern` in `.gitignore` or `.oceignore` re-includes an
+entry. Deliberately excluded are ambiguous names such as `bin/`, `lib/`,
+`out/`, `packages/`, and `vendor/`, which are normal source directories in
+C++, Go, and monorepo layouts.
 
 ## MCP
 
@@ -85,12 +117,17 @@ index in the background, watches the filesystem, and synchronizes only changed
 paths. Unchanged files are identified by stored filesystem metadata and are not
 read or rehashed on restart.
 
+If no workspace is configured (no `--workspace`, `OCE_WORKSPACE`, or
+`OCE_WORKSPACES`), the server indexes the directory it was launched from —
+coding agents start MCP servers with the project as the working directory, so a
+single-project setup needs no workspace configuration at all. As a safety guard,
+an implicit fallback to the filesystem root is rejected.
+
 Declare each allowed workspace with a repeated `--workspace` argument. With one
 workspace, the tool's `workspace_folder` input is optional. With multiple
 workspaces it is required and must exactly match an allowed path. Other paths
 are rejected. For an environment-only setup, use `OCE_WORKSPACE` for one path
-or `OCE_WORKSPACES` with paths separated by the platform path separator. MCP
-does not fall back to the process current directory.
+or `OCE_WORKSPACES` with paths separated by the platform path separator.
 
 ```powershell
 oce-client-mcp `

@@ -89,11 +89,6 @@ class McpConfiguration:
         log_level: str | None = None,
     ) -> "McpConfiguration":
         roots = _resolve_mcp_roots(workspace_roots)
-        if not roots:
-            raise ClientConfigurationError(
-                "MCP requires at least one workspace; pass --workspace or set "
-                "OCE_WORKSPACE/OCE_WORKSPACES"
-            )
 
         resolved_state_dir = _resolve_path_option(state_dir, "OCE_STATE_DIR")
         client = ClientSettings.from_environment(
@@ -222,7 +217,20 @@ def _resolve_mcp_roots(
             raw_values = () if single is None or not single.strip() else (single,)
     else:
         raw_values = values
-    return tuple(dict.fromkeys(Path(value).expanduser().resolve() for value in raw_values))
+    roots = tuple(dict.fromkeys(Path(value).expanduser().resolve() for value in raw_values))
+    if roots:
+        return roots
+    # 零配置回退：MCP 宿主（编码代理等）以项目目录为工作目录拉起本进程，
+    # 未显式配置工作区时，把当前目录当作项目根——agent 在哪个项目运行，
+    # 哪个路径就是项目地址，无需手动配置。
+    fallback = Path.cwd().resolve()
+    if fallback == Path(fallback.anchor):
+        raise ClientConfigurationError(
+            "MCP requires at least one workspace; pass --workspace or set "
+            "OCE_WORKSPACE/OCE_WORKSPACES (refusing to index the filesystem "
+            "root as an implicit fallback)"
+        )
+    return (fallback,)
 
 
 def _resolve_int_option(value: int | None, environment_name: str, default: int) -> int:

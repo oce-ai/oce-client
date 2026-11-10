@@ -89,6 +89,70 @@ def test_ignore_layers_and_negation(tmp_path: Path):
     assert matcher.ignores(".git/config")
 
 
+def test_nested_gitignore_scoped_to_its_directory(tmp_path: Path):
+    """子目录 .gitignore 只管辖自身子树，模式相对该目录解释（同 git 语义）。"""
+    (tmp_path / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / ".gitignore").write_text(
+        "generated/\n*.tmp\n", encoding="utf-8"
+    )
+    (tmp_path / "other").mkdir()
+    matcher = LayeredIgnoreMatcher(tmp_path)
+
+    assert matcher.ignores("sub/generated/x.py", is_dir=True)
+    assert matcher.ignores("sub/deep/generated/x.py", is_dir=True)
+    assert matcher.ignores("sub/a.tmp")
+    assert matcher.ignores("app.log")
+    # 作用域不越界：其他目录的同名路径不受影响
+    assert not matcher.ignores("other/generated/x.py", is_dir=True)
+    assert not matcher.ignores("other/a.tmp")
+
+
+def test_deeper_gitignore_negation_wins_over_shallower(tmp_path: Path):
+    """深层 .gitignore 的反选要能改写浅层结论（git 逐目录语义）。"""
+    (tmp_path / ".gitignore").write_text("*.py\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / ".gitignore").write_text("!local.py\n", encoding="utf-8")
+    matcher = LayeredIgnoreMatcher(tmp_path)
+
+    assert not matcher.ignores("sub/local.py")
+    assert matcher.ignores("sub/other.py")
+    assert matcher.ignores("top.py")
+
+
+def test_language_defaults_apply_without_gitignore(tmp_path: Path):
+    """没有 .gitignore 时也要挡掉各语言构建产物/缓存。"""
+    matcher = LayeredIgnoreMatcher(tmp_path)
+    for ignored in (
+        "__pycache__/a.pyc",
+        "node_modules/x.js",
+        "target/debug/app",
+        ".next/cache.js",
+        "dist/a.js",
+        "_build/x",
+        ".dart_tool/x",
+        "obj/Debug/a.dll",
+        "a.pyc",
+        "a.min.js",
+    ):
+        assert matcher.ignores(ignored), ignored
+    # 不误伤正常源码目录
+    for kept in ("src/main.py", "packages/web/index.ts", "bin/run.py", "lib/core.cpp"):
+        assert not matcher.ignores(kept), kept
+
+
+def test_gitignore_negation_overrides_language_defaults(tmp_path: Path):
+    """内置默认优先级最低：可用 .gitignore 反选回来。"""
+    (tmp_path / ".gitignore").write_text(
+        "!node_modules/\n!dist/\n", encoding="utf-8"
+    )
+    matcher = LayeredIgnoreMatcher(tmp_path)
+    assert not matcher.ignores("node_modules/x.js")
+    assert not matcher.ignores("dist/a.js", is_dir=True)
+    # 硬规则无法反选
+    assert matcher.ignores(".git/config")
+
+
 def test_sync_add_modify_delete_and_restore(tmp_path: Path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("one", encoding="utf-8")
@@ -98,7 +162,10 @@ def test_sync_add_modify_delete_and_restore(tmp_path: Path):
         first = context.sync()
         assert first.checkpoint_id == "chain:1"
         old_name = first.added_blobs[0]
-        (tmp_path / "src" / "main.py").write_text("two", encoding="utf-8")
+        # 改成长度不同的内容：同尺寸改写可能落在同一 mtime 粒度内，
+        # 会被"未改动"快速路径跳过（该路径按 (size, mtime_ns) 判定），
+        # 与本次要验证的变更检测无关，故刻意避开。
+        (tmp_path / "src" / "main.py").write_text("two-two", encoding="utf-8")
         second = context.sync()
         assert old_name in second.deleted_blobs
         assert len(second.added_blobs) == 1
